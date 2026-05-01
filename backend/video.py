@@ -87,11 +87,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         ).overwrite_output()
 
 
-        stream.run(capture_stdout=True, capture_stderr=True, cmd='./ffmpeg')
+        # Try to use 'ffmpeg' from the system path
+        stream.run(capture_stdout=True, capture_stderr=True, cmd='ffmpeg')
 
     except ffmpeg.Error as e:
-
-        print(f"FFmpeg error: {e.stderr.decode()}")
+        stderr = e.stderr.decode() if e.stderr else "No stderr captured"
+        print(f"FFmpeg error: {stderr}")
+        raise RuntimeError(f"FFmpeg failed: {stderr}")
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg binary not found. Please ensure ffmpeg is installed and available in the system path.")
+    except Exception as e:
+        print(f"Unexpected error in compose_video: {str(e)}")
         raise e
     finally:
         if os.path.exists(temp_ass_path):

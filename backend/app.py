@@ -63,47 +63,77 @@ async def upload_video(file: UploadFile = File(...)):
     return {"filename": file.filename}
 
 
-UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "uploads"))
+# On Vercel, we must use /tmp for writing files
+if os.environ.get("VERCEL"):
+    UPLOAD_DIR = "/tmp"
+else:
+    UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "uploads"))
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/sync-lyrics")
 async def sync_lyrics(audio_file: UploadFile = File(...), request: str = File(...)):
-    # request is a JSON string
-    req_data = json.loads(request)
-    lyrics = req_data.get("lyrics", [])
-    
-    # Save temporary audio file
-    audio_path = os.path.join(UPLOAD_DIR, audio_file.filename)
-    with open(audio_path, "wb") as f:
-        f.write(await audio_file.read())
-    # Transcribe audio
-    transcript = transcribe_audio(audio_path)
-    # Align provided lyrics with transcript
-    aligned = align_lyrics(transcript, lyrics)
-    return {"timestamps": aligned}
+    try:
+        # request is a JSON string
+        req_data = json.loads(request)
+        lyrics = req_data.get("lyrics", [])
+        
+        # Save temporary audio file
+        audio_path = os.path.join(UPLOAD_DIR, audio_file.filename)
+        with open(audio_path, "wb") as f:
+            f.write(await audio_file.read())
+        # Transcribe audio
+        transcript = transcribe_audio(audio_path)
+        # Align provided lyrics with transcript
+        aligned = align_lyrics(transcript, lyrics)
+        return {"timestamps": aligned}
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Error in sync_lyrics: {error_details}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "details": error_details}
+        )
 
 
 @app.post("/create-video")
 async def create_video(req: VideoRequest):
-    audio_path = os.path.join(UPLOAD_DIR, req.audio)
-    video_path = os.path.join(UPLOAD_DIR, req.background_video)
-    if not os.path.isfile(audio_path) or not os.path.isfile(video_path):
-        raise HTTPException(status_code=404, detail="Audio or video file not found.")
-    output_path = os.path.join(UPLOAD_DIR, f"output_{req.audio.rsplit('.',1)[0]}.mp4")
-    compose_video(
-        background_path=video_path,
-        audio_path=audio_path,
-        lyrics_timestamps=req.timestamps,
-        style={
-            "font": req.font,
-            "font_size": req.font_size,
-            "font_color": req.font_color,
-            "position": req.position,
-        },
-        output_path=output_path,
-    )
-    return FileResponse(output_path, media_type="video/mp4", filename=os.path.basename(output_path))
+    try:
+        audio_path = os.path.join(UPLOAD_DIR, req.audio)
+        video_path = os.path.join(UPLOAD_DIR, req.background_video)
+        if not os.path.isfile(audio_path) or not os.path.isfile(video_path):
+            raise HTTPException(status_code=404, detail=f"Audio ({req.audio}) or video ({req.background_video}) file not found in {UPLOAD_DIR}.")
+        
+        output_path = os.path.join(UPLOAD_DIR, f"output_{req.audio.rsplit('.',1)[0]}.mp4")
+        compose_video(
+            background_path=video_path,
+            audio_path=audio_path,
+            lyrics_timestamps=req.timestamps,
+            style={
+                "font": req.font,
+                "font_size": req.font_size,
+                "font_color": req.font_color,
+                "position": req.position,
+            },
+            output_path=output_path,
+        )
+        return FileResponse(output_path, media_type="video/mp4", filename=os.path.basename(output_path))
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Error in create_video: {error_details}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "details": error_details}
+        )
 
 @app.get("/health")
 async def health_check():
-    return JSONResponse(content={"status": "ok"})
+    openai_key_set = bool(os.environ.get("OPENAI_API_KEY"))
+    return JSONResponse(content={
+        "status": "ok",
+        "openai_key_set": openai_key_set,
+        "environment": "vercel" if os.environ.get("VERCEL") else "local",
+        "upload_dir": UPLOAD_DIR
+    })
