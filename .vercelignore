@@ -1,0 +1,27 @@
+# Exclude heavy binaries and archives
+backend/ffmpeg
+backend/ffmpeg.zip
+backend/ffmpeg 2
+backend/ffmpeg 2.zip
+backend/ffmpeg-6.0.zip
+backend/ffmpeg-6.0 2.zip
+
+# Exclude media assets and uploads
+backend/uploads/
+backend/*.mp4
+backend/*.mp3
+backend/*.aiff
+backend/*.zip
+
+# Exclude python environments and caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Exclude git and other metadata
+.git/
+.github/
+.vscode/
+.DS_Store

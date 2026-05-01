@@ -1,33 +1,63 @@
 import os
 import json
-import whisper
 import numpy as np
 from dtaidistance import dtw
+from openai import OpenAI
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3
+from mutagen.wave import WAVE
+from mutagen.flac import FLAC
 
+# Initialize OpenAI client (requires OPENAI_API_KEY env var)
+client = OpenAI()
 
-_model = None
-
-def get_model():
-    global _model
-    if _model is None:
-        _model = whisper.load_model("base")
-    return _model
+def get_audio_duration(audio_path: str) -> float:
+    """Get duration of audio file using mutagen (lightweight)."""
+    ext = os.path.splitext(audio_path)[1].lower()
+    try:
+        if ext == '.mp3':
+            audio = MP3(audio_path)
+        elif ext == '.wav':
+            audio = WAVE(audio_path)
+        elif ext == '.flac':
+            audio = FLAC(audio_path)
+        else:
+            # Fallback for other formats
+            from mutagen import File
+            audio = File(audio_path)
+        return audio.info.length
+    except Exception:
+        return 0.0
 
 def transcribe_audio(audio_path: str) -> list:
-    """Transcribe the given audio file using OpenAI Whisper.
+    """Transcribe the given audio file using OpenAI Whisper API.
     Returns a list of dicts with 'word', 'start', 'end' timestamps.
     """
-    model = get_model()
-    # Run transcription with word-level timestamps
-    result = model.transcribe(audio_path, word_timestamps=True)
+    with open(audio_path, "rb") as audio_file:
+        response = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            response_format="verbose_json",
+            timestamp_granularities=["word"]
+        )
+    
     words = []
-    for segment in result.get('segments', []):
-        for word_info in segment.get('words', []):
+    # The API returns a 'words' list in 'verbose_json' format when using timestamp_granularities
+    if hasattr(response, 'words'):
+        for word_info in response.words:
             words.append({
-                "word": word_info.get('word').strip(),
-                "start": word_info.get('start'),
-                "end": word_info.get('end')
+                "word": word_info.get('word', '').strip(),
+                "start": word_info.get('start', 0.0),
+                "end": word_info.get('end', 0.0)
             })
+    elif 'words' in response: # If it's a dict
+         for word_info in response['words']:
+            words.append({
+                "word": word_info.get('word', '').strip(),
+                "start": word_info.get('start', 0.0),
+                "end": word_info.get('end', 0.0)
+            })
+            
     return words
 
 
@@ -35,6 +65,9 @@ def align_lyrics(transcript_words: list, user_lyrics: list) -> list:
     """Align user-provided lyric lines with Whisper transcript using DTW.
     Returns a list of dicts: {"text": line, "start": float, "end": float}
     """
+    if not transcript_words or not user_lyrics:
+        return []
+
     # Prepare sequences: flatten transcript words into a string list
     transcript_seq = [w['word'].lower() for w in transcript_words]
     # Prepare user lyrics lines split into words
@@ -49,41 +82,36 @@ def align_lyrics(transcript_words: list, user_lyrics: list) -> list:
         idx += len(words)
         end = idx - 1
         line_bounds.append((start, end))
-    # Compute DTW distance matrix
 
-    import librosa
     if not transcript_seq or not lyric_seq:
-        raise ValueError("Empty transcript or lyric sequence.")
-    
+        return []
+
     # Compute binary distance matrix: 0 if words match, 1 otherwise
-    C = np.zeros((len(transcript_seq), len(lyric_seq)))
-    for i, t_w in enumerate(transcript_seq):
-        for j, l_w in enumerate(lyric_seq):
-            C[i, j] = 0.0 if t_w == l_w else 1.0
-
-    # Compute DTW alignment
-    D, wp = librosa.sequence.dtw(C=C)
+    # We use a simple cost matrix for dtaidistance or manual DTW
+    # dtaidistance.dtw.distance_matrix requires numerical sequences
     
-    # Build mapping from lyric line index to transcript word indices via path
-    # wp returns path in reverse order: [transcript_idx, lyric_idx]
-    paths = [(i, j) for i, j in wp[::-1]]
-    lyric_to_transcript = {j: [] for _, j in paths}
+    # Map words to unique integers for DTW
+    vocab = {w: i for i, w in enumerate(set(transcript_seq + lyric_seq))}
+    s1 = np.array([vocab[w] for w in transcript_seq], dtype=np.double)
+    s2 = np.array([vocab[w] for w in lyric_seq], dtype=np.double)
 
-    for i, j in paths:
+    # dtaidistance.dtw.warping_path gives the optimal path
+    path = dtw.warping_path(s1, s2)
+    
+    # Build mapping from lyric word index to transcript word indices
+    lyric_to_transcript = {j: [] for j in range(len(lyric_seq))}
+    for i, j in path:
         lyric_to_transcript[j].append(i)
-    # Now for each lyric line, gather corresponding transcript word indices
+
     aligned = []
-    lyric_word_index = 0
     for line_idx, (start, end) in enumerate(line_bounds):
-        # Gather transcript indices for all words in this line
         transcript_indices = []
         for w_idx in range(start, end + 1):
             transcript_indices.extend(lyric_to_transcript.get(w_idx, []))
+        
         if not transcript_indices:
-            # fallback: estimate based on previous line end
             if aligned:
-                prev_end = aligned[-1]["end"]
-                start_time = prev_end + 0.5
+                start_time = aligned[-1]["end"]
                 end_time = start_time + 2.0
             else:
                 start_time = 0.0
@@ -91,6 +119,7 @@ def align_lyrics(transcript_words: list, user_lyrics: list) -> list:
         else:
             start_time = transcript_words[min(transcript_indices)]['start']
             end_time = transcript_words[max(transcript_indices)]['end']
+            
         aligned.append({
             "text": lyric_lines[line_idx],
             "start": round(start_time, 3),
